@@ -4,48 +4,128 @@ name: Actualizar IB3 Televisio
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 */2 * * *"
+    - cron: "17 * * * *"
 
 permissions:
   contents: write
 
+concurrency:
+  group: actualizar-ib3
+  cancel-in-progress: false
+
 jobs:
   actualizar:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
       - name: Instalar yt-dlp y Deno
+        shell: bash
         run: |
           python -m pip install --upgrade "yt-dlp[default]"
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
 
-      - name: Obtener enlaces HLS
+      - name: Generar IB3 con imagen y sonido
         shell: bash
         run: |
-          set -euo pipefail
+          python - <<'PY'
+          import subprocess
+          from pathlib import Path
 
-          VIDEO="https://www.youtube.com/watch?v=_EyRd_Al3mI"
+          youtube = "https://www.youtube.com/watch?v=_EyRd_Al3mI"
 
-          yt-dlp --js-runtimes deno -g -f 270 "$VIDEO" > video.url
-          yt-dlp --js-runtimes deno -g -f 234 "$VIDEO" > audio.url
+          resultado = subprocess.run(
+              [
+                  "yt-dlp",
+                  "--no-config",
+                  "--js-runtimes", "deno",
+                  "-f", "232+234",
+                  "-g", youtube
+              ],
+              capture_output=True,
+              text=True,
+              timeout=180
+          )
 
-          test -s video.url
-          test -s audio.url
+          if resultado.returncode != 0:
+              print(resultado.stderr)
+              raise RuntimeError("Error al obtener IB3")
 
-          {
-            echo "#EXTM3U"
-            echo "#EXTINF:-1 tvg-name=\"IB3 Televisio\" group-title=\"Autonomicas\",IB3 Televisio HD"
-            cat video.url
-          } > IB3.m3u
+          urls = [
+              linea.strip()
+              for linea in resultado.stdout.splitlines()
+              if linea.startswith("https://")
+          ]
+
+          if len(urls) != 2:
+              raise RuntimeError(
+                  "No se obtuvieron video y audio"
+              )
+
+          video, audio = urls
+
+          if not all(".m3u8" in url for url in urls):
+              raise RuntimeError("Los enlaces no son HLS")
+
+          master = (
+              "#EXTM3U\n"
+              "#EXT-X-VERSION:3\n"
+              '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",'
+              'NAME="Espanol",DEFAULT=YES,AUTOSELECT=YES,'
+              f'URI="{audio}"\n'
+              "#EXT-X-STREAM-INF:BANDWIDTH=2600000,"
+              'RESOLUTION=1280x720,'
+              'CODECS="avc1.4D401F,mp4a.40.2",'
+              'AUDIO="audio"\n'
+              f"{video}\n"
+          )
+
+          Path("IB3_master.m3u8").write_text(
+              master, encoding="utf-8"
+          )
+
+          lista = (
+              "#EXTM3U\n"
+              '#EXTINF:-1 tvg-name="IB3 Televisio" '
+              'group-title="Autonomicas",IB3 Televisio HD\n'
+              "https://serveooviedo-beep.github.io/"
+              "ib3-tv/IB3_master.m3u8\n"
+          )
+
+          Path("IB3.m3u").write_text(
+              lista, encoding="utf-8"
+          )
+
+          Path("video.url").write_text(
+              video + "\n", encoding="utf-8"
+          )
+
+          Path("audio.url").write_text(
+              audio + "\n", encoding="utf-8"
+          )
+
+          print("IB3_master.m3u8 generado")
+          print("IB3.m3u generado")
+          print("Video 720p + audio AAC")
+
+          PY
 
       - name: Publicar cambios
+        shell: bash
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add IB3.m3u video.url audio.url
-          git diff --cached --quiet || git commit -m "Actualizar enlaces IB3"
-          git push
+
+          git add IB3_master.m3u8 IB3.m3u video.url audio.url
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Actualizar IB3 con video y audio"
+            git push
+          else
+            echo "Sin cambios"
+          fi
